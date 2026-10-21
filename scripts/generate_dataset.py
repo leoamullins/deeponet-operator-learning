@@ -13,7 +13,8 @@ from solvers.lbm import solve_batch
 
 # --- settings (s = 1.5) ---
 SEED = 0
-N_SHAPES = 5
+N_SHAPES = 1200
+BATCH = 100  # shapes per solve_batch call, keeps GPU memory bounded
 s = 1.5
 r0 = 10 * s
 Ny, Nx = int(100 * s), int(400 * s)
@@ -28,18 +29,26 @@ if __name__ == "__main__":
     )
 
     t0 = time.perf_counter()
-    rho, u, converged, steps = solve_batch(
-        masks, D=2 * r0, Re=RE, u_in=U_IN, max_steps=N_STEPS
-    )
-    print(
-        f"solved {N_SHAPES} shapes in {(time.perf_counter() - t0) / 60:.1f} min, "
-        f"{steps} steps"
-    )
+    ux, uy, p, converged = [], [], [], []
+    for start in range(0, N_SHAPES, BATCH):
+        batch = masks[start : start + BATCH]
+        rho, u, conv, steps = solve_batch(
+            batch, D=2 * r0, Re=RE, u_in=U_IN, max_steps=N_STEPS
+        )
+        p_b = (rho / 3).astype(np.float32)
+        p_b[batch] = 0
+        ux.append(u[:, 0].astype(np.float32))  # (B, Ny, Nx)
+        uy.append(u[:, 1].astype(np.float32))
+        p.append(p_b)
+        converged.append(conv)
+        print(
+            f"shapes {start}-{start + len(batch) - 1}: {steps} steps, "
+            f"{(time.perf_counter() - t0) / 60:.1f} min elapsed",
+            flush=True,
+        )
 
-    ux = u[:, 0].astype(np.float32)  # (N, Ny, Nx)
-    uy = u[:, 1].astype(np.float32)
-    p = (rho / 3).astype(np.float32)
-    p[masks] = 0
+    ux, uy, p = np.concatenate(ux), np.concatenate(uy), np.concatenate(p)
+    converged = np.concatenate(converged)
     sdf = np.array([signed_distance(m) for m in masks]).astype(np.float32)
 
     keep = converged
