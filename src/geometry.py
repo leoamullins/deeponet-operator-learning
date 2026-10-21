@@ -8,10 +8,16 @@ N_THETA = 128
 THETA = np.linspace(0, 2 * np.pi, N_THETA, endpoint=False)
 
 
-def sample_radii(n_shapes, r0, eps, ell, rng):
+def sample_radii(n_shapes, r0, eps, ell, rng, a1_max=0.3, a2_max=0.25):
     L = build_cholesky_factor(THETA, ell, periodic=True)
     g = sample_functions(L, n_shapes, rng)
-    radii = r0 * (1 + eps * g)
+    a1 = rng.uniform(0, a1_max, size=(n_shapes, 1))
+    a2 = rng.uniform(0, a2_max, size=(n_shapes, 1))
+    phi1 = rng.uniform(0, 2 * np.pi, size=(n_shapes, 1))
+    phi2 = rng.uniform(0, 2 * np.pi, size=(n_shapes, 1))
+    radii = r0 * (
+        1 + a1 * np.cos(THETA - phi1) + a2 * np.cos(2 * (THETA - phi2)) + eps * g
+    )
     if np.any(radii <= 0):
         raise ValueError("Non-positive radius: reduce eps")
     return radii
@@ -37,15 +43,32 @@ def convexity_ratio(mask):
     return mask.sum() / hull.volume
 
 
-def sample_convex_shapes(n_shapes, Ny, Nx, cx, cy, r0, eps, ell, rng, min_ratio=1.0):
+def sample_convex_shapes(
+    n_shapes, Ny, Nx, cx, cy, r0, eps, ell, rng, a1_max=0.3, a2_max=0.18, tol=-0.2
+):
+    kept_radii, kept_margins = [], []
+    while len(kept_radii) < n_shapes:
+        radii = sample_radii(n_shapes, r0, eps, ell, rng, a1_max=a1_max, a2_max=a2_max)
+        convex, margin = is_convex(radii, tol=tol)
+        kept_radii.extend(radii[convex])
+        kept_margins.extend(margin[convex])
 
-    masks, kept = [], []
-    while len(masks) < n_shapes:
-        for r in sample_radii(n_shapes, r0, eps, ell, rng):
-            mask = shape_mask(r, Ny, Nx, cx, cy)
-            if convexity_ratio(mask) >= min_ratio:
-                masks.append(mask)
-                kept.append(r)
-            if len(masks) == n_shapes:
-                break
-    return np.array(masks), np.array(kept)
+    radii = np.array(kept_radii[:n_shapes])
+    margins = np.array(kept_margins[:n_shapes])
+    masks = np.array([shape_mask(r, Ny, Nx, cx, cy) for r in radii])
+    return masks, radii, margins
+
+
+def is_convex(radii, tol=0.0):
+    N = radii.shape[-1]
+    k = np.fft.fftfreq(N, d=1 / N)  # integer wavenumbers, since θ has period 2π
+    r_hat = np.fft.fft(radii, axis=-1)
+
+    k1 = k.copy()
+    k1[N // 2] = 0  # drop the Nyquist mode for the odd derivative
+    r1 = np.fft.ifft(1j * k1 * r_hat, axis=-1).real  # dr/dθ
+    r2 = np.fft.ifft(-(k**2) * r_hat, axis=-1).real  # d²r/dθ²
+
+    curv = radii**2 + 2 * r1**2 - radii * r2
+    margin = (curv / radii**2).min(axis=-1)  # dimensionless; 1.0 for a perfect circle
+    return margin >= tol, margin

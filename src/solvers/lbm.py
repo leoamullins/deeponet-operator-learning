@@ -1,7 +1,11 @@
+import jax
+import jax.numpy as jnp
 import numpy as np
+from jax import lax
 
+jax.config.update("jax_default_matmul_precision", "highest")
 # D2Q9 lattice: directions (cx, cy) and weights
-C = np.array(
+C_NP = np.array(
     [
         [0, 0],  # 0: rest
         [1, 0],  # 1: east
@@ -13,9 +17,11 @@ C = np.array(
         [-1, -1],  # 7: south-west
         [1, -1],
     ]
-)  # 8: south-east
+)
 
-W = np.array([4 / 9, 1 / 9, 1 / 9, 1 / 9, 1 / 9, 1 / 36, 1 / 36, 1 / 36, 1 / 36])
+C = jnp.array(C_NP, dtype=jnp.float32)
+W = jnp.array([4 / 9] + [1 / 9] * 4 + [1 / 36] * 4, dtype=jnp.float32)
+OPP = jnp.array([0, 3, 4, 1, 2, 7, 8, 5, 6])
 
 # opposite direction of each i, for bounce-back
 OPP = np.array([0, 3, 4, 1, 2, 7, 8, 5, 6])
@@ -25,13 +31,13 @@ CS2 = 1 / 3  # lattice speed of sound squared
 
 def macroscopic(f):
     rho = f.sum(axis=0)
-    momentum = np.einsum("id,iyx->dyx", C, f)
+    momentum = jnp.einsum("id,iyx->dyx", C, f)
     u = momentum / rho
     return rho, u
 
 
 def equilibrium(rho, u):
-    cu = np.einsum("id,dyx->iyx", C, u)
+    cu = jnp.einsum("id,dyx->iyx", C, u)
     usq = (u**2).sum(0)
     return W[:, None, None] * rho * (1 + 3 * cu + 4.5 * cu**2 - 1.5 * usq)
 
@@ -41,64 +47,69 @@ def collide(f, feq, tau):
 
 
 def stream(f):
-    out = np.empty_like(f)
-    for i, (cx, cy) in enumerate(C):
-        out[i] = np.roll(f[i], shift=(cy, cx), axis=(0, 1))
-    return out
+    return jnp.stack(
+        [jnp.roll(f[i], shift=(cy, cx), axis=(0, 1)) for i, (cx, cy) in enumerate(C_NP)]
+    )
 
 
 def cylinder_mask(Ny, Nx, cx, cy, r):
-    y, x = np.mgrid[0:Ny, 0:Nx]
+    y, x = jnp.mgrid[0:Ny, 0:Nx]
     return (x - cx) ** 2 + (y - cy) ** 2 <= r**2
 
 
 def step(f, tau, mask, u_in):
     f = stream(f)
-
-    f[:, :, -1] = f[:, :, -2]
-    bounced = f[OPP][:, mask]
+    f = f.at[:, :, -1].set(f[:, :, -2])  # outlet
+    bounced = f[OPP]  # reversed populations
 
     rho, u = macroscopic(f)
-    feq = equilibrium(rho, u)
-    f = collide(f, feq, tau)
+    f = f - (f - equilibrium(rho, u)) / tau  # collide
 
     Ny = f.shape[1]
-    rho_in = np.ones((Ny, 1))
-    u_inlet = np.zeros((2, Ny, 1))
-    u_inlet[0] = u_in
-    f[:, :, :1] = equilibrium(rho_in, u_inlet)
+    u_inlet = jnp.zeros((2, Ny, 1)).at[0].set(u_in)
+    f = f.at[:, :, :1].set(equilibrium(jnp.ones((Ny, 1)), u_inlet))  # inlet
 
-    f[:, mask] = bounced
-    return f
+    return jnp.where(mask[None], bounced, f)
 
 
-def run(
-    Nx=400, Ny=100, D=20, Re=20, u_in=0.1, n_steps=20_000, check_every=500, tol=1e-6
+def run_chunk(f, tau, mask, u_in, n):
+    return lax.fori_loop(0, n, lambda _, f: step(f, tau, mask, u_in), f)
+
+
+run_chunk_batched = jax.jit(
+    jax.vmap(run_chunk, in_axes=(0, None, 0, None, None)), static_argnums=4
+)
+macro_batched = jax.jit(jax.vmap(macroscopic))
+equil_batched = jax.jit(jax.vmap(equilibrium))
+
+
+def solve_batch(
+    masks, D, Re, u_in=0.1, max_steps=60_000, chunk=2_000, tol=4e-6, kick=False
 ):
-    nu = u_in * D / Re
-    tau = 3 * nu + 0.5
-    mask = cylinder_mask(Ny, Nx, cx=Nx // 4, cy=Ny // 2, r=D / 2)
+    """masks: NumPy bool (B, Ny, Nx). Returns NumPy rho (B, Ny, Nx), u (B, 2, Ny, Nx),
+    converged (B,), steps taken."""
+    B, Ny, Nx = masks.shape
+    tau = 3 * (u_in * D / Re) + 0.5
+    m = jnp.asarray(masks)
 
-    rho = np.ones((Ny, Nx))
-    u = np.zeros((2, Ny, Nx))
-    u[0] = u_in
-    u[1] += 1e-3 * np.sin(
-        2 * np.pi * np.arange(Nx) / Nx
-    )  # small kick to trigger shedding at high Re
-    f = equilibrium(rho, u)
+    rho = jnp.ones((B, Ny, Nx), dtype=jnp.float32)
+    u = jnp.zeros((B, 2, Ny, Nx), dtype=jnp.float32).at[:, 0].set(u_in)
+    if kick:  # only needed to trigger shedding in the validation run
+        u = u.at[:, 1].add(1e-3 * jnp.sin(2 * jnp.pi * jnp.arange(Nx) / Nx))
+    f = equil_batched(rho, u)
 
-    u_old = u.copy()
-    for t in range(1, n_steps + 1):
-        f = step(f, tau, mask, u_in)
-        if t % check_every == 0:
-            rho, u = macroscopic(f)
-            u[:, mask] = 0
-            change = np.abs(u - u_old).max()
-            print(f"step {t}: max change {change:.2e}")
-            if change < tol:
-                break
-            u_old = u.copy()
+    _, u_old = macro_batched(f)
+    steps = 0
+    while steps < max_steps:
+        f = run_chunk_batched(f, tau, m, u_in, chunk)
+        steps += chunk
+        rho, u = macro_batched(f)
+        u = jnp.where(m[:, None], 0.0, u)
+        change = np.asarray(
+            jnp.abs(u - u_old).max(axis=(1, 2, 3))
+        )  # one value per shape
+        if (change < tol).all():
+            break
+        u_old = u
 
-    rho, u = macroscopic(f)
-    u[:, mask] = 0
-    return rho, u, mask
+    return np.asarray(rho), np.asarray(u), change < tol, steps
