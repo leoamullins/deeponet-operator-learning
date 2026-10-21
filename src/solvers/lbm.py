@@ -53,7 +53,7 @@ def stream(f):
 
 
 def cylinder_mask(Ny, Nx, cx, cy, r):
-    y, x = jnp.mgrid[0:Ny, 0:Nx]
+    y, x = np.mgrid[0:Ny, 0:Nx]
     return (x - cx) ** 2 + (y - cy) ** 2 <= r**2
 
 
@@ -84,7 +84,7 @@ equil_batched = jax.jit(jax.vmap(equilibrium))
 
 
 def solve_batch(
-    masks, D, Re, u_in=0.1, max_steps=60_000, chunk=2_000, tol=4e-6, kick=False
+    masks, D, Re, u_in=0.1, max_steps=60_000, chunk=2_000, tol=1e-5, kick=False
 ):
     """masks: NumPy bool (B, Ny, Nx). Returns NumPy rho (B, Ny, Nx), u (B, 2, Ny, Nx),
     converged (B,), steps taken."""
