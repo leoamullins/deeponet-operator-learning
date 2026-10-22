@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -22,8 +23,8 @@ N_VAL = 200
 SDF_RES = (32, 64)  # branch input resolution (downsampled SDF)
 BATCH = 32  # shapes per batch
 N_POINTS = 2048  # random query points per batch
-EPOCHS = 50
-LR, WEIGHT_DECAY, WARMUP_FRAC = 1e-3, 1e-4, 0.02
+EPOCHS = int(os.environ.get("EPOCHS", 50))  # override with EPOCHS=... env var
+LR, WEIGHT_DECAY, WARMUP_FRAC = 5e-4, 1e-4, 0.02
 P_DIM, WIDTH = 128, 256
 
 device = torch.device(
@@ -176,6 +177,7 @@ if __name__ == "__main__":
             loss = masked_mse(pred, yb[:, pts], mb[:, pts])
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             sched.step()
             epoch_loss += loss.item() / len(train_loader)
