@@ -9,7 +9,7 @@ import time
 
 import numpy as np
 
-from geometry import sample_convex_shapes, signed_distance
+from geometry import sample_convex_shapes, sample_lobed_shapes, signed_distance
 from solvers.lbm import solve_batch
 
 # --- settings (s = 1.5) ---
@@ -26,7 +26,11 @@ SHAPE_KW = {"eps": 0.08, "ell": 1.0, "a1_max": 0.3, "a2_max": 0.18, "tol": -0.2}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="generate the convex-shape flow dataset."
+        description="generate a flow-past-a-body dataset."
+    )
+    parser.add_argument("--sampler", choices=["convex", "lobed"], default="convex")
+    parser.add_argument(
+        "--amp", type=float, nargs=2, default=[0.1, 0.4], help="lobed: amplitude range"
     )
     parser.add_argument("--n-shapes", type=int, default=N_SHAPES)
     parser.add_argument("--batch", type=int, default=BATCH)
@@ -34,16 +38,17 @@ if __name__ == "__main__":
     parser.add_argument("--out", default="train_convex")
     args = parser.parse_args()
 
-    masks, radii, margins = sample_convex_shapes(
-        args.n_shapes,
-        Ny,
-        Nx,
-        cx,
-        cy,
-        r0=r0,
-        rng=np.random.default_rng(args.seed),
-        **SHAPE_KW,
-    )
+    rng = np.random.default_rng(args.seed)
+    if args.sampler == "convex":
+        shape_kw = SHAPE_KW
+        masks, radii, margins = sample_convex_shapes(
+            args.n_shapes, Ny, Nx, cx, cy, r0=r0, rng=rng, **shape_kw
+        )
+    else:
+        shape_kw = {"amp": args.amp}
+        masks, radii, margins = sample_lobed_shapes(
+            args.n_shapes, Ny, Nx, cx, cy, r0=r0, rng=rng, **shape_kw
+        )
 
     t0 = time.perf_counter()
     ux, uy, p, converged = [], [], [], []
@@ -99,7 +104,8 @@ if __name__ == "__main__":
                 cy=cy,
                 Re=RE,
                 u_in=U_IN,
-                **SHAPE_KW,
+                sampler=args.sampler,
+                **shape_kw,
             ),
             fp,
             indent=2,

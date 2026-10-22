@@ -59,15 +59,28 @@ def sample_convex_shapes(
     return masks, radii, margins
 
 
+def sample_lobed_shapes(
+    n_shapes, Ny, Nx, cx, cy, r0, rng, amp=(0.1, 0.4), lobes=(3, 4, 5)
+):
+    """r = r0 (1 + a cos k(theta - phi)): concave once a is large enough for the lobe count k."""
+    k = rng.choice(lobes, size=(n_shapes, 1))
+    a = rng.uniform(*amp, size=(n_shapes, 1))
+    phi = rng.uniform(0, 2 * np.pi, size=(n_shapes, 1))
+    radii = r0 * (1 + a * np.cos(k * (THETA - phi)))
+    _, margins = is_convex(radii)
+    masks = np.array([shape_mask(r, Ny, Nx, cx, cy) for r in radii])
+    return masks, radii, margins
+
+
 def is_convex(radii, tol=0.0):
     N = radii.shape[-1]
-    k = np.fft.fftfreq(N, d=1 / N)  # integer wavenumbers, since θ has period 2π
+    k = np.fft.fftfreq(N, d=1 / N)  # integer wavenumbers, since theta has period 2pi
     r_hat = np.fft.fft(radii, axis=-1)
 
     k1 = k.copy()
     k1[N // 2] = 0  # drop the Nyquist mode for the odd derivative
-    r1 = np.fft.ifft(1j * k1 * r_hat, axis=-1).real  # dr/dθ
-    r2 = np.fft.ifft(-(k**2) * r_hat, axis=-1).real  # d²r/dθ²
+    r1 = np.fft.ifft(1j * k1 * r_hat, axis=-1).real  # dr/dtheta
+    r2 = np.fft.ifft(-(k**2) * r_hat, axis=-1).real  # d2r/dtheta2
 
     curv = radii**2 + 2 * r1**2 - radii * r2
     margin = (curv / radii**2).min(axis=-1)  # dimensionless; 1.0 for a perfect circle
