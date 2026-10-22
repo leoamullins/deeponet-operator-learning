@@ -1,6 +1,22 @@
 # Operator Learning
 
-**Status:** In progress. The antiderivative validation case is done. The flow-past-a-body dataset (1200 convex shapes) has been generated, and a DeepONet training script for it is written.
+**Status:** In progress. A DeepONet trained on 1200 convex shapes reaches 1–3% relative error in distribution. Out-of-distribution evaluation has started with a first non-convex shape. Sharp corners and multiple obstacles are still to do.
+
+---
+
+## Problem statement
+
+Neural operator surrogates predict a simulation's output in milliseconds rather than minutes, which makes them useful in engineering design, where many shapes need to be evaluated quickly. But in design they are used on new shapes, unlike anything in their training data. There a surrogate can be wrong while its predictions still look physically plausible. To know when to trust it, we need to know which kinds of new geometry it handles, and why it fails on the rest.
+
+This project asks:
+
+> **When a DeepONet trained on flow around smooth convex obstacles meets unseen shapes, where and why does it fail?**
+
+**Approach.** A lattice Boltzmann solver, written from scratch and validated against flow past a cylinder, generates steady 2D flow at Re = 20 around random smooth convex obstacles. A DeepONet learns to map each obstacle's signed distance field to the velocity and pressure fields. It is then tested on shapes that move step by step away from the training data along three axes: more concavity, sharp corners, and multiple obstacles.
+
+---
+
+## Background: operator learning
 
 Standard supervised learning methods map vectors to vectors (a feature vector to a target vector), in other words the method learns a function. Operator learning maps *functions* to *functions*; here, an input function $u$ to the output of some operator applied to it.
 
@@ -79,11 +95,12 @@ The output for each field is the dot product of the branch and trunk features, p
 - Measures pressure relative to the upstream edge.
 - Normalises each field with mean and std from the training fluid cells.
 - Holds out 200 shapes for validation.
-- Trains with AdamW, linear warmup and cosine decay. Each batch uses 32 shapes and 2048 random query points, and the MSE is masked to fluid cells.
-- Every 10 epochs, reports the relative $L^2$ error on the validation set for each field.
+- Trains with AdamW (peak LR $5 \times 10^{-4}$, gradients clipped to norm 1), linear warmup and cosine decay. Each batch uses 32 shapes and 2048 random query points, and the MSE is masked to fluid cells.
+- Optionally oversamples query points near the body: `WALL_FRAC` of each batch's points come from cells within `WALL_BAND` of a training body's surface.
+- Every 10 epochs, reports the relative $L^2$ error on the validation set for each field, over all fluid cells and over the wall band ($|\text{sdf}| < 0.3\,r_0$).
 
 ```bash
-uv run python src/train.py
+EPOCHS=1000 WALL_FRAC=0.5 uv run python src/train.py
 ```
 
 The best model is saved to `checkpoints/best.pt`, together with its model config, normalisation stats, data config and train/val split. The loss history goes to `checkpoints/history.json`. To reload the model:
@@ -93,6 +110,33 @@ ckpt = torch.load("checkpoints/best.pt")
 model = DeepONet(**ckpt["model_cfg"])
 model.load_state_dict(ckpt["model"])
 ```
+
+---
+
+## Results
+
+Trained for 1000 epochs with `WALL_FRAC=0.5`, evaluated on 200 held-out shapes:
+
+| Validation relative $L^2$ | $u_x$ | $u_y$ | $p$ |
+|---|---|---|---|
+| All fluid cells | 0.010 | 0.033 | 0.014 |
+| Wall band ($\|\text{sdf}\| < 0.3\,r_0$) | 0.067 | 0.089 | 0.041 |
+
+$u_y$ has the highest relative error mostly because it is close to zero over most of the domain. The wall band is harsher still, because no-slip drives the velocity towards zero there.
+
+![Validation error during training](docs/figures/training_curve.png)
+
+The predicted fields for a typical validation shape (median error) match the LBM closely. What error remains is concentrated in a thin layer at the body surface:
+
+![Median validation shape](docs/figures/median_validation_shape.png)
+
+Error grows steadily as shapes become less convex, even within the training distribution:
+
+![Error vs convexity margin](docs/figures/error_vs_convexity.png)
+
+On a non-convex trefoil (convexity margin −2.86, far below the training minimum of −0.2), the model still gets the overall flow right: the wake, the acceleration around the body, and the stagnation pressure. But it smooths over the concave notches, and the error is about 4–5× the validation median (`ux` 0.048, `uy` 0.154, `p` 0.052):
+
+![Non-convex trefoil](docs/figures/nonconvex_trefoil.png)
 
 ---
 
