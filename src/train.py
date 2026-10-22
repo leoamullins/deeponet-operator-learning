@@ -11,9 +11,9 @@ import time
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset
 
+from data import EVAL_BAND, downsample_sdf, load_data, rel_l2
 from model import DeepONet
 
 DATA = ROOT / "data" / "train_convex"
@@ -30,7 +30,6 @@ P_DIM, WIDTH = 128, 256
 # |sdf| < WALL_BAND (in r0) for some training shape; WALL_FRAC=0 is uniform sampling
 WALL_FRAC = float(os.environ.get("WALL_FRAC", 0.0))
 WALL_BAND = float(os.environ.get("WALL_BAND", 0.3))
-EVAL_BAND = 0.3  # fixed band for the wall validation error, comparable across runs
 
 device = torch.device(
     "cuda"
@@ -52,42 +51,9 @@ class FlowDataset(Dataset):
         return self.X[i], self.Y[i], self.M[i], self.Wm[i]
 
 
-def load_data(path):
-    with open(str(path) + ".json") as f:
-        meta = json.load(f)
-    cx, cy, r0 = meta["cx"], meta["cy"], meta["r0"]
-
-    # cropping
-    y0, y1 = cy - int(2.5 * r0), cy + int(2.5 * r0)
-    x0, x1 = cx - int(2 * r0), cx + int(8 * r0)
-    crop = lambda a: a[:, y0:y1, x0:x1]
-
-    with np.load(str(path) + ".npz") as d:
-        masks = crop(d["masks"])
-        sdf = crop(d["sdf"]) / r0  # sdf in units of r0
-        ux, uy, p = crop(d["ux"]), crop(d["uy"]), crop(d["p"])
-
-    p = p - p[:, :, :1].mean(
-        axis=(1, 2), keepdims=True
-    )  # pressure relative to the upstream edge
-    fields = np.stack([ux, uy, p], axis=-1)
-
-    yy, xx = np.mgrid[y0:y1, x0:x1]
-    coords = np.stack([(xx - cx) / r0, (yy - cy) / r0], axis=-1).reshape(-1, 2)
-    return sdf, masks, fields, coords.astype(np.float32)
-
-
 def masked_mse(pred, target, fluid):
     err = ((pred - target) ** 2).mean(dim=-1)
     return (err * fluid).sum() / fluid.sum()
-
-
-def rel_l2(pred, true, mask):
-    """Per-shape relative L2 over masked cells, (B, 3)."""
-    m = mask[..., None]
-    num = (((pred - true) * m) ** 2).sum(dim=1).sqrt()
-    den = ((true * m) ** 2).sum(dim=1).sqrt()
-    return num / den
 
 
 @torch.no_grad()
@@ -123,10 +89,7 @@ if __name__ == "__main__":
     fields = (fields - mean) / std
 
     # tensors
-    sdf_t = torch.tensor(sdf, dtype=torch.float32).unsqueeze(1)  # (N, 1, H, W)
-    X = F.interpolate(
-        sdf_t, size=SDF_RES, mode="bilinear", align_corners=False
-    ).flatten(1)  # downsampling to SDF_RES
+    X = downsample_sdf(sdf, SDF_RES)
     Y = torch.tensor(fields.reshape(N, H * Wd, 3), dtype=torch.float32)
     M = torch.tensor(~masks.reshape(N, -1), dtype=torch.float32)
     Wm = M * torch.tensor(np.abs(sdf.reshape(N, -1)) < EVAL_BAND, dtype=torch.float32)
