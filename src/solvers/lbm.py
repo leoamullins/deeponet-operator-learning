@@ -88,6 +88,7 @@ def solve_batch(
 ):
     """masks: NumPy bool (B, Ny, Nx). Returns NumPy rho (B, Ny, Nx), u (B, 2, Ny, Nx),
     converged (B,), steps taken."""
+    assert max_steps >= chunk, "max_steps must cover at least one chunk"
     B, Ny, Nx = masks.shape
     tau = 3 * (u_in * D / Re) + 0.5
     m = jnp.asarray(masks)

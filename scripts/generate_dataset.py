@@ -25,9 +25,7 @@ SHAPE_KW = {"eps": 0.08, "ell": 1.0, "a1_max": 0.3, "a2_max": 0.18, "tol": -0.2}
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="generate a flow-past-a-body dataset."
-    )
+    parser = argparse.ArgumentParser(description="generate a flow-past-a-body dataset.")
     parser.add_argument("--sampler", choices=["convex", "lobed"], default="convex")
     parser.add_argument(
         "--amp", type=float, nargs=2, default=[0.1, 0.4], help="lobed: amplitude range"
@@ -35,8 +33,9 @@ if __name__ == "__main__":
     parser.add_argument("--n-shapes", type=int, default=N_SHAPES)
     parser.add_argument("--batch", type=int, default=BATCH)
     parser.add_argument("--seed", type=int, default=SEED)
-    parser.add_argument("--out", default="train_convex")
+    parser.add_argument("--out", help="name in data/ (default: train_<sampler>)")
     args = parser.parse_args()
+    args.out = args.out or f"train_{args.sampler}"
 
     rng = np.random.default_rng(args.seed)
     if args.sampler == "convex":

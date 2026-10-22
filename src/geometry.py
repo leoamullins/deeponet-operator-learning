@@ -44,14 +44,21 @@ def convexity_ratio(mask):
 
 
 def sample_convex_shapes(
-    n_shapes, Ny, Nx, cx, cy, r0, eps, ell, rng, a1_max=0.3, a2_max=0.18, tol=-0.2
+    n_shapes, Ny, Nx, cx, cy, r0, eps, ell, rng, a1_max=0.3, a2_max=0.18, tol=-0.2,
+    max_rounds=100,
 ):
     kept_radii, kept_margins = [], []
-    while len(kept_radii) < n_shapes:
+    for _ in range(max_rounds):
+        if len(kept_radii) >= n_shapes:
+            break
         radii = sample_radii(n_shapes, r0, eps, ell, rng, a1_max=a1_max, a2_max=a2_max)
         convex, margin = is_convex(radii, tol=tol)
         kept_radii.extend(radii[convex])
         kept_margins.extend(margin[convex])
+    if len(kept_radii) < n_shapes:
+        raise RuntimeError(
+            f"only {len(kept_radii)}/{n_shapes} convex shapes after {max_rounds} rounds; loosen tol or amplitudes"
+        )
 
     radii = np.array(kept_radii[:n_shapes])
     margins = np.array(kept_margins[:n_shapes])
