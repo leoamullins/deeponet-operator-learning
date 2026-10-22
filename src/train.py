@@ -26,6 +26,11 @@ N_POINTS = 2048  # random query points per batch
 EPOCHS = int(os.environ.get("EPOCHS", 50))  # override with EPOCHS=... env var
 LR, WEIGHT_DECAY, WARMUP_FRAC = 5e-4, 1e-4, 0.02
 P_DIM, WIDTH = 128, 256
+# near-wall query sampling: WALL_FRAC of each batch's points come from cells with
+# |sdf| < WALL_BAND (in r0) for some training shape; WALL_FRAC=0 is uniform sampling
+WALL_FRAC = float(os.environ.get("WALL_FRAC", 0.0))
+WALL_BAND = float(os.environ.get("WALL_BAND", 0.3))
+EVAL_BAND = 0.3  # fixed band for the wall validation error, comparable across runs
 
 device = torch.device(
     "cuda"
@@ -37,14 +42,14 @@ device = torch.device(
 
 
 class FlowDataset(Dataset):
-    def __init__(self, X, Y, M):
-        self.X, self.Y, self.M = X, Y, M
+    def __init__(self, X, Y, M, Wm):
+        self.X, self.Y, self.M, self.Wm = X, Y, M, Wm
 
     def __len__(self):
         return len(self.X)
 
     def __getitem__(self, i):
-        return self.X[i], self.Y[i], self.M[i]
+        return self.X[i], self.Y[i], self.M[i], self.Wm[i]
 
 
 def load_data(path):
@@ -77,20 +82,27 @@ def masked_mse(pred, target, fluid):
     return (err * fluid).sum() / fluid.sum()
 
 
+def rel_l2(pred, true, mask):
+    """Per-shape relative L2 over masked cells, (B, 3)."""
+    m = mask[..., None]
+    num = (((pred - true) * m) ** 2).sum(dim=1).sqrt()
+    den = ((true * m) ** 2).sum(dim=1).sqrt()
+    return num / den
+
+
 @torch.no_grad()
 def evaluate(model, loader, Q, mean, std):
+    """Mean relative L2 per field over all fluid cells and over the wall band."""
     model.eval()
-    rel_sum, n = torch.zeros(3, device=device), 0
-    for xb, yb, mb in loader:
-        xb, yb, mb = xb.to(device), yb.to(device), mb.to(device)
+    rel_sum, wall_sum, n = torch.zeros(3, device=device), torch.zeros(3, device=device), 0
+    for xb, yb, mb, wb in loader:
+        xb, yb, mb, wb = xb.to(device), yb.to(device), mb.to(device), wb.to(device)
         pred = model(xb, Q) * std + mean
         true = yb * std + mean
-        fluid = mb[..., None]
-        num = (((pred - true) * fluid) ** 2).sum(dim=1).sqrt()  # (B, 3)
-        den = ((true * fluid) ** 2).sum(dim=1).sqrt()
-        rel_sum += (num / den).sum(dim=0)
+        rel_sum += rel_l2(pred, true, mb).sum(dim=0)
+        wall_sum += rel_l2(pred, true, wb).sum(dim=0)
         n += len(xb)
-    return (rel_sum / n).cpu().numpy()
+    return (rel_sum / n).cpu().numpy(), (wall_sum / n).cpu().numpy()
 
 
 if __name__ == "__main__":
@@ -117,13 +129,20 @@ if __name__ == "__main__":
     ).flatten(1)  # downsampling to SDF_RES
     Y = torch.tensor(fields.reshape(N, H * Wd, 3), dtype=torch.float32)
     M = torch.tensor(~masks.reshape(N, -1), dtype=torch.float32)
+    Wm = M * torch.tensor(np.abs(sdf.reshape(N, -1)) < EVAL_BAND, dtype=torch.float32)
+
+    # cells within WALL_BAND of any training body: the union of the wall layers
+    near = (np.abs(sdf[tr_idx]) < WALL_BAND).any(0).reshape(-1)
+    near_idx = torch.tensor(np.flatnonzero(near), device=device)
+    n_wall = int(WALL_FRAC * N_POINTS)
+    print(f"wall sampling: {n_wall}/{N_POINTS} pts from |sdf| < {WALL_BAND} ({near.mean():.1%} of crop)")
 
     Q = torch.tensor(coords, device=device)  # query grid
     mean_t = torch.tensor(mean, dtype=torch.float32, device=device)
     std_t = torch.tensor(std, dtype=torch.float32, device=device)
 
     # datasets and loader
-    full_ds = FlowDataset(X, Y, M)
+    full_ds = FlowDataset(X, Y, M, Wm)
     train_ds = Subset(full_ds, tr_idx.tolist())
     val_ds = Subset(full_ds, val_idx.tolist())
     pin = device.type == "cuda"
@@ -164,15 +183,19 @@ if __name__ == "__main__":
     for epoch in range(1, EPOCHS + 1):
         model.train()
         epoch_loss = 0.0
-        for xb, yb, mb in train_loader:
+        for xb, yb, mb, _ in train_loader:
             opt.zero_grad()
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
             mb = mb.to(device, non_blocking=True)
 
-            pts = torch.randint(
-                0, H * Wd, (N_POINTS,), device=device
-            )  # shared pts for the batch
+            # shared pts for the batch: uniform + near-wall
+            pts = torch.cat(
+                [
+                    torch.randint(0, H * Wd, (N_POINTS - n_wall,), device=device),
+                    near_idx[torch.randint(0, len(near_idx), (n_wall,), device=device)],
+                ]
+            )
             pred = model(xb, Q[pts])
             loss = masked_mse(pred, yb[:, pts], mb[:, pts])
 
@@ -183,19 +206,21 @@ if __name__ == "__main__":
             epoch_loss += loss.item() / len(train_loader)
 
         if epoch % 10 == 0 or epoch == EPOCHS:
-            rel = evaluate(model, val_loader, Q, mean_t, std_t)
+            rel, rel_wall = evaluate(model, val_loader, Q, mean_t, std_t)
             lr_now = sched.get_last_lr()[0]
             history.append(
                 {
                     "epoch": epoch,
                     "train_loss": epoch_loss,
                     "val_rel": rel.tolist(),
+                    "val_rel_wall": rel_wall.tolist(),
                     "lr": lr_now,
                 }
             )
             print(
                 f"epoch {epoch:4d}  loss {epoch_loss:.2e}  "
                 f"val rel L2  ux {rel[0]:.3f}  uy {rel[1]:.3f}  p {rel[2]:.3f}  "
+                f"wall {rel_wall[0]:.3f} {rel_wall[1]:.3f} {rel_wall[2]:.3f}  "
                 f"lr {lr_now:.1e}  ({(time.perf_counter() - t0) / 60:.1f} min)"
             )
 
@@ -210,11 +235,14 @@ if __name__ == "__main__":
                         "data_cfg": {
                             "data": str(DATA.relative_to(ROOT)),
                             "sdf_res": SDF_RES,
+                            "wall_frac": WALL_FRAC,
+                            "wall_band": WALL_BAND,
                             "tr_idx": tr_idx.tolist(),
                             "val_idx": val_idx.tolist(),
                         },
                         "epoch": epoch,
                         "val_rel": rel.tolist(),
+                        "val_rel_wall": rel_wall.tolist(),
                     },
                     OUT / "best.pt",
                 )
