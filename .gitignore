@@ -5,3 +5,8 @@ __pycache__/
 venv/
 .venv/
 .DS_Store
+data/
+notebooks/
+checkpoints/
+CLAUDE.md
+*.code-workspace
