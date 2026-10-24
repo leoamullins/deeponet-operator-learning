@@ -11,7 +11,9 @@ NAMES = ["$u_x$", "$u_y$", "$p$"]
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="per-shape error vs convexity margin.")
     parser.add_argument("csv", help="output of scripts/evaluate.py")
-    parser.add_argument("--out", default=str(ROOT / "docs/figures/error_vs_convexity.png"))
+    parser.add_argument(
+        "--out", default=str(ROOT / "docs/figures/error_vs_convexity.png")
+    )
     args = parser.parse_args()
 
     d = np.genfromtxt(args.csv, delimiter=",", names=True)
